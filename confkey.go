@@ -40,6 +40,7 @@ import (
 	"unicode"
 
 	validator "github.com/choria-io/go-validator"
+	"github.com/oleiade/reflections"
 )
 
 // Validate validates the struct
@@ -55,17 +56,19 @@ func SetStructDefaults(target interface{}) error {
 		return errors.New("pointer is required")
 	}
 
-	st := reflect.TypeOf(target).Elem()
+	fields, err := reflections.Fields(target)
+	if err != nil {
+		return err
+	}
 
-	for i := 0; i <= st.NumField()-1; i++ {
-		field := st.Field(i)
+	for _, field := range fields {
+		confkey, _ := reflections.GetFieldTag(target, field, "confkey")
+		deflt, _ := reflections.GetFieldTag(target, field, "default")
 
-		if key, ok := field.Tag.Lookup("confkey"); ok {
-			if value, ok := field.Tag.Lookup("default"); ok {
-				err := SetStructFieldWithKey(target, key, value)
-				if err != nil {
-					return err
-				}
+		if confkey != "" && deflt != "" {
+			err = SetStructFieldWithKey(target, confkey, deflt)
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -75,17 +78,16 @@ func SetStructDefaults(target interface{}) error {
 
 // StringFieldWithKey retrieves a string from target that matches key, "" when not found
 func StringFieldWithKey(target interface{}, key string) string {
-	item, err := fieldWithKey(target, key)
+	val, kind, err := getFieldValAndKind(target, key)
 	if err != nil {
 		return ""
 	}
 
-	field := reflect.ValueOf(target).Elem().FieldByName(item)
-
-	if field.Kind() == reflect.String {
-		ptr := field.Addr().Interface().(*string)
-
-		return string(*ptr)
+	if kind == reflect.String {
+		v, ok := val.(string)
+		if ok {
+			return v
+		}
 	}
 
 	return ""
@@ -93,21 +95,16 @@ func StringFieldWithKey(target interface{}, key string) string {
 
 // StringListWithKey retrieves a []string from target that matches key, empty when not found
 func StringListWithKey(target interface{}, key string) []string {
-	item, err := fieldWithKey(target, key)
+	val, kind, err := getFieldValAndKind(target, key)
 	if err != nil {
 		return []string{}
 	}
 
-	field := reflect.ValueOf(target).Elem().FieldByName(item)
-
-	if field.Kind() == reflect.Slice {
-		ptr := field.Addr().Interface().(*[]string)
-
-		if *ptr == nil {
-			return []string{}
+	if kind == reflect.Slice {
+		v, ok := val.([]string)
+		if ok {
+			return v
 		}
-
-		return []string(*ptr)
 	}
 
 	return []string{}
@@ -115,17 +112,16 @@ func StringListWithKey(target interface{}, key string) []string {
 
 // BoolWithKey retrieves a bool from target that matches key, false when not found
 func BoolWithKey(target interface{}, key string) bool {
-	item, err := fieldWithKey(target, key)
+	val, kind, err := getFieldValAndKind(target, key)
 	if err != nil {
 		return false
 	}
 
-	field := reflect.ValueOf(target).Elem().FieldByName(item)
-
-	if field.Kind() == reflect.Bool {
-		ptr := field.Addr().Interface().(*bool)
-
-		return bool(*ptr)
+	if kind == reflect.Bool {
+		v, ok := val.(bool)
+		if ok {
+			return v
+		}
 	}
 
 	return false
@@ -133,17 +129,16 @@ func BoolWithKey(target interface{}, key string) bool {
 
 // IntWithKey retrieves an int from target that matches key, 0 when not found
 func IntWithKey(target interface{}, key string) int {
-	item, err := fieldWithKey(target, key)
+	val, kind, err := getFieldValAndKind(target, key)
 	if err != nil {
 		return 0
 	}
 
-	field := reflect.ValueOf(target).Elem().FieldByName(item)
-
-	if field.Kind() == reflect.Int {
-		ptr := field.Addr().Interface().(*int)
-
-		return int(*ptr)
+	if kind == reflect.Int {
+		v, ok := val.(int)
+		if ok {
+			return v
+		}
 	}
 
 	return 0
@@ -151,20 +146,35 @@ func IntWithKey(target interface{}, key string) int {
 
 // Int64WithKey retrieves an int from target that matches key, 0 when not found
 func Int64WithKey(target interface{}, key string) int64 {
-	item, err := fieldWithKey(target, key)
+	val, kind, err := getFieldValAndKind(target, key)
 	if err != nil {
 		return 0
 	}
 
-	field := reflect.ValueOf(target).Elem().FieldByName(item)
-
-	if field.Kind() == reflect.Int64 {
-		ptr := field.Addr().Interface().(*int64)
-
-		return int64(*ptr)
+	if kind == reflect.Int64 {
+		return val.(int64)
 	}
 
 	return 0
+}
+
+func getFieldValAndKind(target interface{}, key string) (interface{}, reflect.Kind, error) {
+	item, err := fieldWithKey(target, key)
+	if err != nil {
+		return nil, reflect.Invalid, err
+	}
+
+	val, err := reflections.GetField(target, item)
+	if err != nil {
+		return nil, reflect.Invalid, err
+	}
+
+	kind, err := reflections.GetFieldKind(target, item)
+	if err != nil {
+		return nil, reflect.Invalid, err
+	}
+
+	return val, kind, nil
 }
 
 // SetStructFieldWithKey finds the struct key that matches the confkey on target and assign the value to it
@@ -285,18 +295,15 @@ func SetStructFieldWithKey(target interface{}, key string, value interface{}) er
 
 // determines the struct key name that is tagged with a certain confkey
 func fieldWithKey(s interface{}, key string) (string, error) {
-	st := reflect.TypeOf(s)
-	if st.Kind() == reflect.Ptr {
-		st = st.Elem()
+	fields, err := reflections.Fields(s)
+	if err != nil {
+		return "", fmt.Errorf("can't find any structure element configured with confkey '%s'", key)
 	}
 
-	for i := 0; i <= st.NumField()-1; i++ {
-		field := st.Field(i)
-
-		if confkey, ok := field.Tag.Lookup("confkey"); ok {
-			if confkey == key {
-				return field.Name, nil
-			}
+	for _, field := range fields {
+		confkey, _ := tag(s, field, "confkey")
+		if confkey == key {
+			return field, nil
 		}
 	}
 
@@ -305,23 +312,9 @@ func fieldWithKey(s interface{}, key string) (string, error) {
 
 // retrieve a tag for a struct field
 func tag(s interface{}, field string, tag string) (string, bool) {
-	st := reflect.TypeOf(s)
+	val, err := reflections.GetFieldTag(s, field, tag)
 
-	if st.Kind() == reflect.Ptr {
-		st = st.Elem()
-	}
-
-	for i := 0; i <= st.NumField()-1; i++ {
-		f := st.Field(i)
-
-		if f.Name == field {
-			if value, ok := f.Tag.Lookup(tag); ok {
-				return value, true
-			}
-		}
-	}
-
-	return "", false
+	return val, err == nil
 }
 
 // StrToBool converts a typical boolianish string to bool.
